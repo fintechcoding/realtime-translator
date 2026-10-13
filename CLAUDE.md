@@ -83,7 +83,9 @@ app/
 - GUI dil degistiginde `_retranslate_ui()` tum widget'lari gunceller
 
 ### UI / Tasarim
-- Kurumsal koyu tema: `styles/theme.py` (lacivert yuzeyler + `#4f7cff` mavi aksan + `#2dd4bf` teal ikincil)
+- Tema sistemi: `styles/theme.py` tek sablondan **light + dark** palet uretir; calisma zamaninda gecis (`_apply_theme`), Ayarlar > Gorunum'dan secilir, `gui.theme`'e kaydedilir (varsayilan: light)
+- main_window renkleri palete bagli (`self._pal`/`self._c`); ikonlar tema degisince yeniden renklenir (icon registry: `_themed_icons`/`_themed_chips`)
+- Kurumsal tema: lacivert/beyaz yuzeyler + mavi aksan + teal ikincil
 - Her sayfa bir header bar ile baslar: baslik + alt-baslik; Ceviri sayfasinda ayrica durum pill'i (Hazir/Aktif/Durduruldu)
 - Kart tabanli layout (`QFrame` class="card"), ikonlu kart basliklari, ikonlu sidebar nav
 - Ikonlar `styles/icons.py` icinde inline SVG olarak tanimli; `icons.icon(ad, renk, boyut)` ile QIcon uretilir (QtSvg kullanir, ek asset dosyasi yok)
@@ -109,6 +111,13 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 ```bash
 python main.py
 ```
+
+### Ozellikler / Davranislar
+- **API key test**: Ayarlar > "Anahtarlari Test Et" → `utils/key_validator.py` (urllib) her servisi kisa bir istekle dogrular; sonuc gecerli/gecersiz/bos/baglanti-hatasi olarak renkli gosterilir
+- **System tray**: `gui.minimize_to_tray` true ise pencere kapatinca tray'e kucultur; tray menusunden baslat/durdur, goster, cikis
+- **TTS kapsama**: Deepgram Aura sadece EN; desteklenmeyen hedef dilde ( or. Azure'suz RU/TR) ses uretilmez, kullanici uyarilir, metin cevirisi calisir
+- **Thread guvenligi**: STT transcript callback'i ve PortAudio capture callback'i `loop.call_soon_threadsafe` ile event loop'a aktarilir (worker thread'den dogrudan asyncio kullanilmaz)
+- Secili dil cifti + tema config'e kaydedilip acilista geri yuklenir
 
 ## Onemli Notlar
 - Yeni dependency eklenmeden Google Translate implementasyonu yapildi (urllib kullanildi)
