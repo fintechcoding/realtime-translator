@@ -45,6 +45,7 @@ from app.utils.constants import SUPPORTED_LANGUAGES, APP_NAME, APP_VERSION
 from app.utils.i18n import t, set_language, get_language, available_languages
 from app.utils import key_validator
 from app.gui.widgets.stats_tracker import StatsTracker
+from app.gui.system_tray import SystemTray
 from app.gui.styles import theme, icons
 
 
@@ -83,11 +84,36 @@ class MainWindow(QMainWindow):
         saved_lang = self._config.get("gui.language", "tr")
         set_language(saved_lang)
 
+        self._system_tray = None
+        self._force_quit = False
+
         self._setup_ui()
         self._apply_theme(self._mode)
         self._connect_signals()
         self._populate_devices()
+        self._setup_tray()
         self._check_first_run()
+
+    def _setup_tray(self):
+        from PyQt6.QtWidgets import QSystemTrayIcon
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            self._system_tray = None
+            return
+        icon_path = Path(__file__).resolve().parent / "assets" / "app.ico"
+        tray_icon = QIcon(str(icon_path)) if icon_path.exists() else self.windowIcon()
+        self._system_tray = SystemTray(self, tray_icon)
+        self._system_tray.set_toggle_callback(self._toggle_pipeline)
+        self._system_tray.set_quit_callback(self._quit_app)
+        self._system_tray.show()
+
+    def _quit_app(self):
+        self._force_quit = True
+        app = QApplication.instance()
+        if self._running and self._pipeline:
+            fut = asyncio.ensure_future(self._stop_pipeline())
+            fut.add_done_callback(lambda _: app.quit() if app else None)
+        elif app:
+            app.quit()
 
     # Palette shortcut
     def _c(self, key: str) -> str:
@@ -1254,6 +1280,8 @@ class MainWindow(QMainWindow):
             )
             tts_manager.add_provider(azure_tts)
 
+        tts_ok = tts_manager.get_provider(target) is not None
+
         self._event_bus = EventBus()
         self._event_bus.on("transcript", self._on_transcript_event)
         self._event_bus.on("translation", self._on_translation_event)
@@ -1281,12 +1309,18 @@ class MainWindow(QMainWindow):
 
             src_name = SUPPORTED_LANGUAGES.get(source, {}).get("name", source)
             tgt_name = SUPPORTED_LANGUAGES.get(target, {}).get("name", target)
-            self._status_label.setText(t("status.active", src=src_name, tgt=tgt_name))
-            self._status_label.setStyleSheet(f"color: {self._c('ok')}; font-size: 12px; font-weight: 600;")
+            if tts_ok:
+                self._status_label.setText(t("status.active", src=src_name, tgt=tgt_name))
+                self._status_label.setStyleSheet(f"color: {self._c('ok')}; font-size: 12px; font-weight: 600;")
+            else:
+                self._status_label.setText(t("status.tts_unavailable", lang=tgt_name))
+                self._status_label.setStyleSheet(f"color: {self._c('warn')}; font-size: 12px; font-weight: 600;")
 
             self._sidebar_status.setText(t("sidebar.active"))
             self._update_sidebar_badge("active")
             self._style_pill(self._tr_pill, "active")
+            if self._system_tray:
+                self._system_tray.update_status(True)
 
             self._source_lang.setEnabled(False)
             self._target_lang.setEnabled(False)
@@ -1321,6 +1355,8 @@ class MainWindow(QMainWindow):
         self._sidebar_status.setText(t("sidebar.stopped"))
         self._update_sidebar_badge("stopped")
         self._style_pill(self._tr_pill, "stopped")
+        if self._system_tray:
+            self._system_tray.update_status(False)
 
         self._source_lang.setEnabled(True)
         self._target_lang.setEnabled(True)
@@ -1394,6 +1430,19 @@ class MainWindow(QMainWindow):
     # ================================================================
 
     def closeEvent(self, event):
+        # Minimize to tray instead of quitting, if enabled and a tray exists.
+        if (
+            not self._force_quit
+            and self._config.get("gui.minimize_to_tray", False)
+            and self._system_tray is not None
+            and self._system_tray.isVisible()
+        ):
+            event.ignore()
+            self.hide()
+            return
+
         if self._running:
             asyncio.ensure_future(self._stop_pipeline())
+        if self._system_tray is not None:
+            self._system_tray.hide()
         event.accept()

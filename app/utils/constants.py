@@ -16,7 +16,10 @@ SUPPORTED_LANGUAGES = {
     "UK": {"name": "Українська", "deepgram": "uk", "deepl": "UK", "google": "uk", "azure_voice": "uk-UA-OstapNeural"},
 }
 
-DEEPGRAM_AURA_SUPPORTED_LANGUAGES = {"EN", "ES", "DE", "FR", "IT", "JA", "NL", "PT"}
+# Deepgram Aura (aura-asteria-en and siblings) synthesize English only; using an
+# English voice for other languages produces wrong pronunciation, so restrict to EN.
+# Non-English targets are handled by Azure Speech (see provider_manager).
+DEEPGRAM_AURA_SUPPORTED_LANGUAGES = {"EN"}
 
 AUDIO_SAMPLE_RATE = 16000
 AUDIO_CHANNELS = 1

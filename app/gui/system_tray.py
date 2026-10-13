@@ -6,11 +6,15 @@ from app.utils.i18n import t
 
 
 class SystemTray(QSystemTrayIcon):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, icon: QIcon = None):
         super().__init__(parent)
+        if icon is not None:
+            self.setIcon(icon)
         self.setToolTip(APP_NAME)
         self._is_running = False
+        self._quit_callback = None
         self._setup_menu()
+        self.activated.connect(self._on_activated)
 
     def _setup_menu(self):
         menu = QMenu()
@@ -33,6 +37,16 @@ class SystemTray(QSystemTrayIcon):
     def set_toggle_callback(self, callback):
         self._toggle_action.triggered.connect(callback)
 
+    def set_quit_callback(self, callback):
+        self._quit_callback = callback
+
+    def _on_activated(self, reason):
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            self._on_show()
+
     def update_status(self, running: bool):
         self._is_running = running
         self._toggle_action.setText(t("tray.stop") if running else t("tray.start"))
@@ -49,5 +63,8 @@ class SystemTray(QSystemTrayIcon):
             parent.activateWindow()
 
     def _on_quit(self):
-        from PyQt6.QtWidgets import QApplication
-        QApplication.quit()
+        if self._quit_callback is not None:
+            self._quit_callback()
+        else:
+            from PyQt6.QtWidgets import QApplication
+            QApplication.quit()

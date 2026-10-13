@@ -16,11 +16,8 @@ class TTSProviderManager:
             if provider.supports_language(language):
                 return provider
 
-        if self._providers:
-            log.warning(
-                f"No TTS provider supports '{language}', using last fallback"
-            )
-            return self._providers[-1]
-
-        log.error("No TTS providers configured")
+        # No provider can actually speak this language. Returning a provider that
+        # can't (e.g. an English voice for Russian) would produce garbled audio,
+        # so return None and let the caller surface a clear warning.
+        log.warning(f"No TTS provider supports '{language}' - skipping speech output")
         return None

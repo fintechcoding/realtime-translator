@@ -651,6 +651,11 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "en": "Please enter your API keys first",
         "ru": "Сначала введите ваши API-ключи",
     },
+    "status.tts_unavailable": {
+        "tr": "Uyari: {lang} icin ses cikisi yok — Azure Speech anahtari gerekli (ceviri metni yine de calisir)",
+        "en": "Warning: no voice output for {lang} — Azure Speech key required (text translation still works)",
+        "ru": "Внимание: нет озвучки для {lang} — нужен ключ Azure Speech (текстовый перевод работает)",
+    },
 
     # ── System tray ───────────────────────────────────────────────
     "tray.show": {
