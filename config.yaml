@@ -10,7 +10,7 @@ gui:
   language: tr
   minimize_to_tray: true
   show_transcript: true
-  theme: dark
+  theme: light
   window_height: 600
   window_width: 800
 stt:

@@ -10,10 +10,22 @@ from app.utils.logger import log
 
 
 class DeepgramSTT(BaseSTT):
-    def __init__(self, api_key: str, model: str = "nova-2"):
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "nova-2",
+        sample_rate: int = 16000,
+        interim_results: bool = True,
+        endpointing: int = 300,
+        punctuate: bool = True,
+    ):
         super().__init__()
         self._api_key = api_key
         self._model = model
+        self._sample_rate = int(sample_rate)
+        self._interim_results = bool(interim_results)
+        self._endpointing = int(endpointing)
+        self._punctuate = bool(punctuate)
         self._client: Optional[DeepgramClient] = None
         self._connection = None
         self._ctx_manager = None
@@ -46,12 +58,12 @@ class DeepgramSTT(BaseSTT):
             model=self._model,
             language=language,
             encoding="linear16",
-            sample_rate="16000",
+            sample_rate=str(self._sample_rate),
             channels="1",
-            interim_results="true",
+            interim_results="true" if self._interim_results else "false",
             utterance_end_ms="1000",
-            punctuate="true",
-            endpointing="300",
+            punctuate="true" if self._punctuate else "false",
+            endpointing=str(self._endpointing),
         )
         self._connection = self._ctx_manager.__enter__()
 

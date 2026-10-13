@@ -45,9 +45,12 @@ def main():
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
 
-    # Apply premium dark theme
+    # Apply saved theme (light/dark) before the window builds — no flash
     from app.gui.styles.theme import get_stylesheet
-    app.setStyleSheet(get_stylesheet())
+    saved_theme = config.get("gui.theme", "light")
+    if saved_theme not in ("light", "dark"):
+        saved_theme = "light"
+    app.setStyleSheet(get_stylesheet(saved_theme))
 
     from app.gui.main_window import MainWindow
 

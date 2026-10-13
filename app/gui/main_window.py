@@ -7,6 +7,7 @@ from typing import Optional
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QSize
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
+    QApplication,
     QMainWindow,
     QWidget,
     QVBoxLayout,
@@ -42,26 +43,9 @@ from app.tts.provider_manager import TTSProviderManager
 from app.utils.config import Config
 from app.utils.constants import SUPPORTED_LANGUAGES, APP_NAME, APP_VERSION
 from app.utils.i18n import t, set_language, get_language, available_languages
+from app.utils import key_validator
 from app.gui.widgets.stats_tracker import StatsTracker
-from app.gui.styles import icons
-
-# ── Palette (kept in sync with styles/theme.py COLORS) ───────────────
-TEXT = "#e7eaf2"
-SEC = "#97a1b6"
-MUTED = "#5a6479"
-ACCENT = "#4f7cff"
-ACCENT_BRIGHT = "#6f96ff"
-TEAL = "#2dd4bf"
-OK = "#22c55e"
-WARN = "#f59e0b"
-ERR = "#ef4444"
-
-_DIM = {
-    ACCENT: "rgba(79, 124, 255, 0.14)",
-    OK: "rgba(34, 197, 94, 0.14)",
-    WARN: "rgba(245, 158, 11, 0.14)",
-    TEAL: "rgba(45, 212, 191, 0.14)",
-}
+from app.gui.styles import theme, icons
 
 
 class SignalBridge(QObject):
@@ -84,14 +68,30 @@ class MainWindow(QMainWindow):
         self._stats = StatsTracker(self)
         self._nav_buttons: list[QPushButton] = []
 
-        # Apply saved language before building UI
+        # Theme state
+        self._mode = self._config.get("gui.theme", "light")
+        if self._mode not in ("light", "dark"):
+            self._mode = "light"
+        self._pal = theme.palette(self._mode)
+        self._themed_icons: list[tuple] = []   # (kind, widget, name, color_key, size)
+        self._themed_chips: list[tuple] = []    # (label, dim_key)
+        self._pill_state = "idle"
+        self._badge_state = "idle"
+        self._vb_state: Optional[bool] = None
+
+        # Apply saved UI language before building UI
         saved_lang = self._config.get("gui.language", "tr")
         set_language(saved_lang)
 
         self._setup_ui()
+        self._apply_theme(self._mode)
         self._connect_signals()
         self._populate_devices()
         self._check_first_run()
+
+    # Palette shortcut
+    def _c(self, key: str) -> str:
+        return self._pal[key]
 
     # ================================================================
     #  UI SETUP
@@ -122,10 +122,64 @@ class MainWindow(QMainWindow):
         self._pages.addWidget(self._build_settings_page())
         root.addWidget(self._pages, 1)
 
+    # ── Theming ──────────────────────────────────────────────────
+
+    def _reg_icon_label(self, label: QLabel, name: str, color_key: str, size: int) -> QLabel:
+        self._themed_icons.append(("label", label, name, color_key, size))
+        label.setPixmap(icons.pixmap(name, self._pal[color_key], size))
+        return label
+
+    def _reg_icon_button(self, btn: QPushButton, name: str, color_key: str, size: int) -> QPushButton:
+        self._themed_icons.append(("button", btn, name, color_key, size))
+        btn.setIcon(icons.icon(name, self._pal[color_key], size))
+        btn.setIconSize(QSize(size, size))
+        return btn
+
+    def _apply_theme(self, mode: str):
+        self._mode = mode
+        self._pal = theme.palette(mode)
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(theme.get_stylesheet(mode))
+
+        # Recolor registered icons
+        for kind, widget, name, color_key, size in self._themed_icons:
+            if kind == "label":
+                widget.setPixmap(icons.pixmap(name, self._pal[color_key], size))
+            else:
+                widget.setIcon(icons.icon(name, self._pal[color_key], size))
+
+        # Stat-card icon chips
+        for label, dim_key in self._themed_chips:
+            label.setStyleSheet(f"background-color: {self._pal[dim_key]}; border-radius: 10px;")
+
+        # Nav icons (active/inactive colors)
+        self._set_active_nav(self._pages.currentIndex() if hasattr(self, "_pages") else 0)
+
+        # Start button icon reflects running state
+        if hasattr(self, "_start_btn"):
+            self._start_btn.setIcon(icons.icon("stop" if self._running else "play", self._pal["on_accent"], 18))
+
+        # Dynamic state styles
+        self._style_pill(self._tr_pill, self._pill_state)
+        self._update_sidebar_badge(self._badge_state)
+        self._apply_status_default_colors()
+        self._apply_vb_status_color()
+
+    def _apply_status_default_colors(self):
+        if not self._running:
+            self._status_label.setStyleSheet(f"color: {self._c('text_sec')}; font-size: 12px;")
+            self._latency_label.setStyleSheet(f"color: {self._c('text_muted')}; font-size: 12px;")
+
+    def _apply_vb_status_color(self):
+        if self._vb_state is True:
+            self._vb_status.setStyleSheet(f"color: {self._c('ok')}; font-size: 11px;")
+        elif self._vb_state is False:
+            self._vb_status.setStyleSheet(f"color: {self._c('warn')}; font-size: 11px;")
+
     # ── Shared building blocks ───────────────────────────────────
 
     def _build_header(self, title: str, subtitle: str, pill: bool = False):
-        """Return (wrap, title_label, subtitle_label, pill_label|None)."""
         wrap = QWidget()
         v = QVBoxLayout(wrap)
         v.setContentsMargins(0, 0, 0, 0)
@@ -165,13 +219,12 @@ class MainWindow(QMainWindow):
         lay.setSpacing(12)
         return card, lay
 
-    def _card_title_row(self, icon_name: str, text: str, color: str = ACCENT):
-        """Return (row_layout, title_label)."""
+    def _card_title_row(self, icon_name: str, text: str, color_key: str = "accent"):
         row = QHBoxLayout()
         row.setSpacing(9)
         ic = QLabel()
-        ic.setPixmap(icons.pixmap(icon_name, color, 16))
         ic.setFixedSize(16, 16)
+        self._reg_icon_label(ic, icon_name, color_key, 16)
         lbl = QLabel(text)
         lbl.setProperty("class", "cardTitle")
         row.addWidget(ic)
@@ -180,10 +233,11 @@ class MainWindow(QMainWindow):
         return row, lbl
 
     def _style_pill(self, lbl: QLabel, state: str):
+        self._pill_state = state
         palette = {
-            "idle": (_DIM[ACCENT], ACCENT_BRIGHT, t("sidebar.ready")),
-            "active": (_DIM[OK], OK, t("sidebar.active")),
-            "stopped": ("rgba(90, 100, 121, 0.16)", "#8a93a6", t("sidebar.stopped")),
+            "idle": (self._c("accent_dim"), self._c("accent"), t("sidebar.ready")),
+            "active": (self._c("ok_dim"), self._c("ok"), t("sidebar.active")),
+            "stopped": (self._c("gray_dim"), self._c("gray_fg"), t("sidebar.stopped")),
         }
         bg, fg, text = palette.get(state, palette["idle"])
         lbl.setText(f"●  {text}")
@@ -203,15 +257,14 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(0, 0, 0, 18)
         lay.setSpacing(0)
 
-        # Logo area (icon mark + name)
         logo_area = QWidget()
         logo_lay = QHBoxLayout(logo_area)
         logo_lay.setContentsMargins(20, 24, 20, 22)
         logo_lay.setSpacing(11)
 
         mark = QLabel()
-        mark.setPixmap(icons.pixmap("globe", ACCENT_BRIGHT, 26))
         mark.setFixedSize(26, 26)
+        self._reg_icon_label(mark, "globe", "accent", 26)
         logo_lay.addWidget(mark, 0, Qt.AlignmentFlag.AlignVCenter)
 
         name_col = QVBoxLayout()
@@ -227,19 +280,18 @@ class MainWindow(QMainWindow):
         lay.addWidget(logo_area)
 
         sep = QFrame()
+        sep.setObjectName("navSep")
         sep.setFixedHeight(1)
-        sep.setStyleSheet("background-color: #1c2230; margin: 0 20px;")
+        sep.setContentsMargins(20, 0, 20, 0)
         lay.addWidget(sep)
         lay.addSpacing(16)
 
-        # Section label
         self._nav_section = QLabel("  " + t("sidebar.section_main"))
         self._nav_section.setObjectName("navSection")
         self._nav_section.setContentsMargins(20, 0, 0, 0)
         lay.addWidget(self._nav_section)
         lay.addSpacing(6)
 
-        # Nav buttons
         self._nav_keys = [
             "sidebar.translation",
             "sidebar.statistics",
@@ -255,7 +307,7 @@ class MainWindow(QMainWindow):
             btn.setProperty("class", "nav-btn")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setFixedHeight(42)
-            btn.setIcon(icons.icon(icn, SEC, 18))
+            btn.setIcon(icons.icon(icn, self._pal["text_sec"], 18))
             btn.setIconSize(QSize(18, 18))
             btn.clicked.connect(lambda _, i=idx: self._navigate_to(i))
             nav_lay.addWidget(btn)
@@ -264,7 +316,6 @@ class MainWindow(QMainWindow):
 
         lay.addStretch()
 
-        # Status badge
         badge_wrap = QWidget()
         badge_lay = QVBoxLayout(badge_wrap)
         badge_lay.setContentsMargins(18, 0, 18, 0)
@@ -288,19 +339,22 @@ class MainWindow(QMainWindow):
         for i, btn in enumerate(self._nav_buttons):
             is_active = i == active
             btn.setProperty("active", "true" if is_active else "false")
-            btn.setIcon(icons.icon(self._nav_icons[i], "#ffffff" if is_active else SEC, 18))
+            color = self._pal["nav_active_icon"] if is_active else self._pal["text_sec"]
+            btn.setIcon(icons.icon(self._nav_icons[i], color, 18))
             btn.style().unpolish(btn)
             btn.style().polish(btn)
 
     def _update_sidebar_badge(self, state: str):
+        self._badge_state = state
         styles = {
-            "idle": f"background-color: rgba(79,124,255,0.12); color: {ACCENT_BRIGHT};",
-            "active": f"background-color: rgba(34,197,94,0.14); color: {OK};",
-            "stopped": "background-color: rgba(90,100,121,0.12); color: #8a93a6;",
+            "idle": (self._c("accent_dim"), self._c("accent")),
+            "active": (self._c("ok_dim"), self._c("ok")),
+            "stopped": (self._c("gray_dim"), self._c("gray_fg")),
         }
-        base = styles.get(state, styles["idle"])
+        bg, fg = styles.get(state, styles["idle"])
         self._sidebar_status.setStyleSheet(
-            base + " border-radius: 9px; padding: 9px 12px; font-size: 11px; font-weight: 600;"
+            f"background-color: {bg}; color: {fg};"
+            " border-radius: 9px; padding: 9px 12px; font-size: 11px; font-weight: 600;"
         )
 
     # ── Page 1: Translation ──────────────────────────────────────
@@ -318,15 +372,12 @@ class MainWindow(QMainWindow):
         self._style_pill(self._tr_pill, "idle")
         lay.addWidget(header)
 
-        # -- Config row: Language card + Device card --
         config_row = QHBoxLayout()
         config_row.setSpacing(16)
 
         # Language card
         lang_card, lang_lay = self._card()
-        lang_title_row, self._lang_card_title = self._card_title_row(
-            "languages", t("page.lang_selection"), ACCENT_BRIGHT
-        )
+        lang_title_row, self._lang_card_title = self._card_title_row("languages", t("page.lang_selection"), "accent")
         lang_lay.addLayout(lang_title_row)
 
         self._source_lang = QComboBox()
@@ -334,14 +385,12 @@ class MainWindow(QMainWindow):
         for code, info in SUPPORTED_LANGUAGES.items():
             self._source_lang.addItem(f"{info['name']} ({code})", code)
             self._target_lang.addItem(f"{info['name']} ({code})", code)
-        self._source_lang.setCurrentIndex(0)
-        self._target_lang.setCurrentIndex(1)
+        self._restore_language_pair()
 
         self._swap_btn = QPushButton()
         self._swap_btn.setObjectName("swapBtn")
         self._swap_btn.setFixedSize(38, 38)
-        self._swap_btn.setIcon(icons.icon("swap", ACCENT_BRIGHT, 17))
-        self._swap_btn.setIconSize(QSize(17, 17))
+        self._reg_icon_button(self._swap_btn, "swap", "accent", 17)
         self._swap_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._swap_btn.setToolTip(t("tooltip.swap_langs"))
         self._swap_btn.clicked.connect(self._swap_languages)
@@ -372,9 +421,7 @@ class MainWindow(QMainWindow):
 
         # Device card
         dev_card, dev_lay = self._card()
-        dev_title_row, self._dev_card_title = self._card_title_row(
-            "mic", t("page.audio_devices"), TEAL
-        )
+        dev_title_row, self._dev_card_title = self._card_title_row("mic", t("page.audio_devices"), "teal")
         dev_lay.addLayout(dev_title_row)
 
         self._mic_lbl = QLabel(t("label.microphone"))
@@ -390,7 +437,7 @@ class MainWindow(QMainWindow):
         dev_lay.addWidget(self._output_device)
 
         self._vb_status = QLabel()
-        self._vb_status.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        self._vb_status.setProperty("class", "cardHint")
         self._vb_status.setWordWrap(True)
         dev_lay.addWidget(self._vb_status)
         dev_lay.addStretch()
@@ -398,25 +445,23 @@ class MainWindow(QMainWindow):
 
         lay.addLayout(config_row)
 
-        # -- Start / Stop --
+        # Start / Stop
         self._start_btn = QPushButton(t("btn.start"))
         self._start_btn.setObjectName("startBtn")
         self._start_btn.setFixedHeight(52)
-        self._start_btn.setIcon(icons.icon("play", "#ffffff", 18))
+        self._start_btn.setIcon(icons.icon("play", self._pal["on_accent"], 18))
         self._start_btn.setIconSize(QSize(18, 18))
         self._start_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._start_btn.clicked.connect(self._toggle_pipeline)
         lay.addWidget(self._start_btn)
 
-        # -- Transcript (two cards in a splitter) --
+        # Transcript
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
 
         src_card, src_glay = self._card()
         src_glay.setContentsMargins(16, 14, 16, 16)
-        src_title_row, self._src_card_title = self._card_title_row(
-            "waveform", t("transcript.source_title"), ACCENT_BRIGHT
-        )
+        src_title_row, self._src_card_title = self._card_title_row("waveform", t("transcript.source_title"), "accent")
         src_glay.addLayout(src_title_row)
         self._source_text = QTextEdit()
         self._source_text.setReadOnly(True)
@@ -425,9 +470,7 @@ class MainWindow(QMainWindow):
 
         tgt_card, tgt_glay = self._card()
         tgt_glay.setContentsMargins(16, 14, 16, 16)
-        tgt_title_row, self._tgt_card_title = self._card_title_row(
-            "languages", t("transcript.target_title"), TEAL
-        )
+        tgt_title_row, self._tgt_card_title = self._card_title_row("languages", t("transcript.target_title"), "teal")
         tgt_glay.addLayout(tgt_title_row)
         self._target_text = QTextEdit()
         self._target_text.setReadOnly(True)
@@ -439,16 +482,16 @@ class MainWindow(QMainWindow):
         splitter.setSizes([500, 500])
         lay.addWidget(splitter, 1)
 
-        # -- Footer status row --
+        # Footer
         status_lay = QHBoxLayout()
         status_lay.setContentsMargins(4, 0, 4, 0)
         status_lay.setSpacing(10)
         self._status_label = QLabel(t("status.ready"))
-        self._status_label.setStyleSheet(f"color: {SEC}; font-size: 12px;")
+        self._status_label.setProperty("class", "secondary")
         self._latency_label = QLabel(t("status.latency"))
-        self._latency_label.setStyleSheet(f"color: {MUTED}; font-size: 12px;")
+        self._latency_label.setProperty("class", "verLabel")
         ver = QLabel(f"v{APP_VERSION}")
-        ver.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        ver.setProperty("class", "verLabel")
 
         status_lay.addWidget(self._status_label)
         status_lay.addStretch()
@@ -458,6 +501,16 @@ class MainWindow(QMainWindow):
         lay.addLayout(status_lay)
 
         return page
+
+    def _restore_language_pair(self):
+        """Restore saved source/target from config, else sensible defaults."""
+        src = self._config.get("translation.source_language", "TR")
+        tgt = self._config.get("translation.target_language", "RU")
+        codes = list(SUPPORTED_LANGUAGES.keys())
+        si = codes.index(src) if src in codes else 0
+        ti = codes.index(tgt) if tgt in codes else (1 if len(codes) > 1 else 0)
+        self._source_lang.setCurrentIndex(si)
+        self._target_lang.setCurrentIndex(ti)
 
     # ── Page 2: Statistics ───────────────────────────────────────
 
@@ -473,27 +526,25 @@ class MainWindow(QMainWindow):
         )
         lay.addWidget(header)
 
-        # 4 stat cards
         cards = QHBoxLayout()
         cards.setSpacing(16)
 
-        self._stat_session = self._make_stat_card("clock", t("stats.session_duration"), "00:00:00", ACCENT)
-        self._stat_translations = self._make_stat_card("repeat", t("stats.translation_count"), "0", OK)
-        self._stat_characters = self._make_stat_card("type", t("stats.characters"), "0", WARN)
-        self._stat_latency = self._make_stat_card("zap", t("stats.avg_latency"), "--", TEAL)
+        self._stat_session = self._make_stat_card("clock", t("stats.session_duration"), "00:00:00", "accent")
+        self._stat_translations = self._make_stat_card("repeat", t("stats.translation_count"), "0", "ok")
+        self._stat_characters = self._make_stat_card("type", t("stats.characters"), "0", "warn")
+        self._stat_latency = self._make_stat_card("zap", t("stats.avg_latency"), "--", "teal")
 
         for card in [self._stat_session, self._stat_translations, self._stat_characters, self._stat_latency]:
             cards.addWidget(card["widget"])
         lay.addLayout(cards)
 
-        # DeepL usage
         self._deepl_group = QGroupBox(t("stats.deepl_usage"))
         dl_lay = QVBoxLayout(self._deepl_group)
         dl_lay.setContentsMargins(18, 14, 18, 16)
         dl_lay.setSpacing(10)
 
         self._deepl_usage_label = QLabel(t("stats.deepl_loading"))
-        self._deepl_usage_label.setStyleSheet(f"color: {SEC}; font-size: 12px;")
+        self._deepl_usage_label.setProperty("class", "secondary")
         dl_lay.addWidget(self._deepl_usage_label)
 
         self._deepl_progress = QProgressBar()
@@ -503,12 +554,11 @@ class MainWindow(QMainWindow):
         dl_lay.addWidget(self._deepl_progress)
 
         self._deepl_remaining = QLabel(t("stats.deepl_remaining"))
-        self._deepl_remaining.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        self._deepl_remaining.setProperty("class", "verLabel")
         dl_lay.addWidget(self._deepl_remaining)
 
         lay.addWidget(self._deepl_group)
 
-        # Recent translations
         self._tbl_group = QGroupBox(t("stats.recent_translations"))
         tbl_lay = QVBoxLayout(self._tbl_group)
         tbl_lay.setContentsMargins(14, 12, 14, 14)
@@ -536,7 +586,7 @@ class MainWindow(QMainWindow):
         self._stats.stats_updated.connect(self._refresh_stats_ui)
         return page
 
-    def _make_stat_card(self, icon_name: str, label: str, value: str, color: str) -> dict:
+    def _make_stat_card(self, icon_name: str, label: str, value: str, color_key: str) -> dict:
         card = QFrame()
         card.setProperty("class", "card")
         card_lay = QVBoxLayout(card)
@@ -546,19 +596,20 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout()
         top.setSpacing(10)
         ic = QLabel()
-        ic.setPixmap(icons.pixmap(icon_name, color, 18))
         ic.setFixedSize(36, 36)
         ic.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        ic.setStyleSheet(
-            f"background-color: {_DIM.get(color, _DIM[ACCENT])}; border-radius: 10px;"
-        )
+        dim_key = f"{color_key}_dim"
+        ic.setStyleSheet(f"background-color: {self._pal[dim_key]}; border-radius: 10px;")
+        self._reg_icon_label(ic, icon_name, color_key, 18)
+        self._themed_chips.append((ic, dim_key))
+
         name = QLabel(label)
-        name.setStyleSheet(f"color: {SEC}; font-size: 11.5px; font-weight: 600; background: transparent; border: none;")
+        name.setProperty("class", "statName")
         top.addWidget(ic, 0, Qt.AlignmentFlag.AlignVCenter)
         top.addWidget(name, 1, Qt.AlignmentFlag.AlignVCenter)
 
         val = QLabel(value)
-        val.setStyleSheet(f"color: {TEXT}; font-size: 28px; font-weight: 800; background: transparent; border: none;")
+        val.setProperty("class", "statValue")
 
         card_lay.addLayout(top)
         card_lay.addWidget(val)
@@ -581,11 +632,11 @@ class MainWindow(QMainWindow):
             self._deepl_remaining.setText(t("stats.deepl_remaining_value", remaining=remaining))
 
             if pct > 80:
-                bar_color = ERR
+                bar_color = self._c("err")
             elif pct > 60:
-                bar_color = WARN
+                bar_color = self._c("warn")
             else:
-                bar_color = ACCENT
+                bar_color = self._c("accent")
             self._deepl_progress.setStyleSheet(
                 f"QProgressBar::chunk {{ background-color: {bar_color}; border-radius: 7px; }}"
             )
@@ -621,12 +672,16 @@ class MainWindow(QMainWindow):
         )
         lay.addWidget(header)
 
-        # ── UI Language ──
-        self._lang_ui_group = QGroupBox(t("settings.ui_language"))
-        lang_ui_lay = QHBoxLayout(self._lang_ui_group)
-        lang_ui_lay.setContentsMargins(18, 14, 18, 16)
-        lang_ui_lay.setSpacing(12)
+        # ── Appearance (UI language + theme) ──
+        self._appearance_group = QGroupBox(t("settings.appearance"))
+        appearance_lay = QHBoxLayout(self._appearance_group)
+        appearance_lay.setContentsMargins(18, 14, 18, 16)
+        appearance_lay.setSpacing(18)
 
+        lang_col = QVBoxLayout()
+        lang_col.setSpacing(5)
+        self._ui_lang_lbl = QLabel(t("settings.ui_language"))
+        self._ui_lang_lbl.setProperty("class", "fieldLabel")
         self._ui_lang_combo = QComboBox()
         for code, display in available_languages().items():
             self._ui_lang_combo.addItem(display, code)
@@ -636,10 +691,27 @@ class MainWindow(QMainWindow):
                 self._ui_lang_combo.setCurrentIndex(i)
                 break
         self._ui_lang_combo.currentIndexChanged.connect(self._on_ui_language_changed)
+        lang_col.addWidget(self._ui_lang_lbl)
+        lang_col.addWidget(self._ui_lang_combo)
 
-        lang_ui_lay.addWidget(self._ui_lang_combo)
-        lang_ui_lay.addStretch()
-        lay.addWidget(self._lang_ui_group)
+        theme_col = QVBoxLayout()
+        theme_col.setSpacing(5)
+        self._theme_lbl = QLabel(t("settings.theme"))
+        self._theme_lbl.setProperty("class", "fieldLabel")
+        self._theme_combo = QComboBox()
+        self._theme_combo.addItem(t("settings.theme_light"), "light")
+        self._theme_combo.addItem(t("settings.theme_dark"), "dark")
+        for i in range(self._theme_combo.count()):
+            if self._theme_combo.itemData(i) == self._mode:
+                self._theme_combo.setCurrentIndex(i)
+                break
+        self._theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+        theme_col.addWidget(self._theme_lbl)
+        theme_col.addWidget(self._theme_combo)
+
+        appearance_lay.addLayout(lang_col, 1)
+        appearance_lay.addLayout(theme_col, 1)
+        lay.addWidget(self._appearance_group)
 
         # ── Translation Provider ──
         self._provider_group = QGroupBox(t("settings.translation_provider"))
@@ -659,7 +731,7 @@ class MainWindow(QMainWindow):
         provider_lay.addWidget(self._provider_combo)
 
         self._provider_note = QLabel(t("settings.provider_note"))
-        self._provider_note.setStyleSheet(f"color: {MUTED}; font-size: 11px; font-style: italic;")
+        self._provider_note.setProperty("class", "note")
         self._provider_note.setWordWrap(True)
         provider_lay.addWidget(self._provider_note)
 
@@ -672,134 +744,61 @@ class MainWindow(QMainWindow):
         api_lay.setSpacing(14)
 
         self._api_info = QLabel(t("settings.api_info"))
-        self._api_info.setStyleSheet(f"color: {SEC}; font-size: 12px;")
+        self._api_info.setProperty("class", "settingInfo")
         self._api_info.setWordWrap(True)
         api_lay.addWidget(self._api_info)
 
         # Deepgram
         self._dg_title = QLabel(t("settings.deepgram_title"))
-        self._dg_title.setStyleSheet(f"color: {TEXT}; font-size: 14px; font-weight: 700;")
+        self._dg_title.setProperty("class", "settingTitle")
         api_lay.addWidget(self._dg_title)
         self._dg_desc = QLabel(t("settings.deepgram_desc"))
-        self._dg_desc.setStyleSheet(f"color: {MUTED}; font-size: 11px; margin-top: -2px;")
+        self._dg_desc.setProperty("class", "settingDesc")
         api_lay.addWidget(self._dg_desc)
-
-        row_dg = QHBoxLayout()
-        row_dg.setSpacing(8)
-        self._deepgram_key = QLineEdit(self._config.deepgram_api_key)
-        self._deepgram_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self._deepgram_key.setPlaceholderText("dg_xxxxxxxxxxxxxxxxxxxxxxxx")
-        row_dg.addWidget(self._deepgram_key, 1)
-        self._dg_toggle = QPushButton(t("settings.btn_show"))
-        self._dg_toggle.setProperty("class", "toggle-btn")
-        self._dg_toggle.setFixedSize(64, 38)
-        self._dg_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._dg_toggle.clicked.connect(lambda: self._toggle_visibility(self._deepgram_key, self._dg_toggle))
-        row_dg.addWidget(self._dg_toggle)
-        api_lay.addLayout(row_dg)
-
-        self._dg_link = QPushButton(t("settings.link_deepgram"))
-        self._dg_link.setProperty("class", "link-btn")
-        self._dg_link.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._dg_link.clicked.connect(lambda: webbrowser.open("https://console.deepgram.com/signup"))
-        api_lay.addWidget(self._dg_link)
+        self._deepgram_key, self._dg_toggle = self._key_row("dg_xxxxxxxxxxxxxxxxxxxxxxxx", self._config.deepgram_api_key, api_lay)
+        self._dg_link = self._link_button(t("settings.link_deepgram"), "https://console.deepgram.com/signup", api_lay)
 
         api_lay.addWidget(self._h_line())
 
         # DeepL
         self._dl_title = QLabel(t("settings.deepl_title"))
-        self._dl_title.setStyleSheet(f"color: {TEXT}; font-size: 14px; font-weight: 700;")
+        self._dl_title.setProperty("class", "settingTitle")
         api_lay.addWidget(self._dl_title)
         self._dl_desc = QLabel(t("settings.deepl_desc"))
-        self._dl_desc.setStyleSheet(f"color: {MUTED}; font-size: 11px; margin-top: -2px;")
+        self._dl_desc.setProperty("class", "settingDesc")
         api_lay.addWidget(self._dl_desc)
-
-        row_dl = QHBoxLayout()
-        row_dl.setSpacing(8)
-        self._deepl_key = QLineEdit(self._config.deepl_api_key)
-        self._deepl_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self._deepl_key.setPlaceholderText("xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx:fx")
-        row_dl.addWidget(self._deepl_key, 1)
-        self._dl_toggle = QPushButton(t("settings.btn_show"))
-        self._dl_toggle.setProperty("class", "toggle-btn")
-        self._dl_toggle.setFixedSize(64, 38)
-        self._dl_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._dl_toggle.clicked.connect(lambda: self._toggle_visibility(self._deepl_key, self._dl_toggle))
-        row_dl.addWidget(self._dl_toggle)
-        api_lay.addLayout(row_dl)
-
-        self._dl_link = QPushButton(t("settings.link_deepl"))
-        self._dl_link.setProperty("class", "link-btn")
-        self._dl_link.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._dl_link.clicked.connect(lambda: webbrowser.open("https://www.deepl.com/pro-api"))
-        api_lay.addWidget(self._dl_link)
+        self._deepl_key, self._dl_toggle = self._key_row("xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx:fx", self._config.deepl_api_key, api_lay)
+        self._dl_link = self._link_button(t("settings.link_deepl"), "https://www.deepl.com/pro-api", api_lay)
 
         api_lay.addWidget(self._h_line())
 
-        # Google Cloud Translation
+        # Google
         self._gg_title = QLabel(t("settings.google_title"))
-        self._gg_title.setStyleSheet(f"color: {TEXT}; font-size: 14px; font-weight: 700;")
+        self._gg_title.setProperty("class", "settingTitle")
         api_lay.addWidget(self._gg_title)
         self._gg_desc = QLabel(t("settings.google_desc"))
-        self._gg_desc.setStyleSheet(f"color: {MUTED}; font-size: 11px; margin-top: -2px;")
+        self._gg_desc.setProperty("class", "settingDesc")
         api_lay.addWidget(self._gg_desc)
-
-        row_gg = QHBoxLayout()
-        row_gg.setSpacing(8)
-        self._google_key = QLineEdit(self._config.google_api_key)
-        self._google_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self._google_key.setPlaceholderText("AIzaXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxX")
-        row_gg.addWidget(self._google_key, 1)
-        self._gg_toggle = QPushButton(t("settings.btn_show"))
-        self._gg_toggle.setProperty("class", "toggle-btn")
-        self._gg_toggle.setFixedSize(64, 38)
-        self._gg_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._gg_toggle.clicked.connect(lambda: self._toggle_visibility(self._google_key, self._gg_toggle))
-        row_gg.addWidget(self._gg_toggle)
-        api_lay.addLayout(row_gg)
-
-        self._gg_link = QPushButton(t("settings.link_google"))
-        self._gg_link.setProperty("class", "link-btn")
-        self._gg_link.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._gg_link.clicked.connect(lambda: webbrowser.open("https://console.cloud.google.com/apis/credentials"))
-        api_lay.addWidget(self._gg_link)
+        self._google_key, self._gg_toggle = self._key_row("AIzaXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxX", self._config.google_api_key, api_lay)
+        self._gg_link = self._link_button(t("settings.link_google"), "https://console.cloud.google.com/apis/credentials", api_lay)
 
         api_lay.addWidget(self._h_line())
 
         # Azure
         self._az_title = QLabel(t("settings.azure_title"))
-        self._az_title.setStyleSheet(f"color: {TEXT}; font-size: 14px; font-weight: 700;")
+        self._az_title.setProperty("class", "settingTitle")
         api_lay.addWidget(self._az_title)
         self._az_desc = QLabel(t("settings.azure_desc"))
-        self._az_desc.setStyleSheet(f"color: {MUTED}; font-size: 11px; margin-top: -2px;")
+        self._az_desc.setProperty("class", "settingDesc")
         api_lay.addWidget(self._az_desc)
+        self._azure_key, self._az_toggle = self._key_row("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", self._config.azure_speech_key, api_lay)
+        self._az_link = self._link_button(t("settings.link_azure"), "https://azure.microsoft.com/en-us/products/ai-services/speech-service", api_lay)
 
-        row_az = QHBoxLayout()
-        row_az.setSpacing(8)
-        self._azure_key = QLineEdit(self._config.azure_speech_key)
-        self._azure_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self._azure_key.setPlaceholderText("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
-        row_az.addWidget(self._azure_key, 1)
-        self._az_toggle = QPushButton(t("settings.btn_show"))
-        self._az_toggle.setProperty("class", "toggle-btn")
-        self._az_toggle.setFixedSize(64, 38)
-        self._az_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._az_toggle.clicked.connect(lambda: self._toggle_visibility(self._azure_key, self._az_toggle))
-        row_az.addWidget(self._az_toggle)
-        api_lay.addLayout(row_az)
-
-        self._az_link = QPushButton(t("settings.link_azure"))
-        self._az_link.setProperty("class", "link-btn")
-        self._az_link.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._az_link.clicked.connect(lambda: webbrowser.open("https://azure.microsoft.com/en-us/products/ai-services/speech-service"))
-        api_lay.addWidget(self._az_link)
-
-        # Azure region
         region_row = QHBoxLayout()
         region_row.setSpacing(10)
         self._region_lbl = QLabel(t("settings.region"))
         self._region_lbl.setFixedWidth(52)
-        self._region_lbl.setStyleSheet(f"color: {SEC}; font-size: 12px; font-weight: 500;")
+        self._region_lbl.setProperty("class", "fieldLabel")
         self._azure_region = QLineEdit(self._config.azure_speech_region)
         self._azure_region.setPlaceholderText("westeurope")
         self._azure_region.setMaximumWidth(280)
@@ -809,22 +808,36 @@ class MainWindow(QMainWindow):
         api_lay.addLayout(region_row)
 
         self._az_note = QLabel(t("settings.azure_note"))
-        self._az_note.setStyleSheet(f"color: {MUTED}; font-size: 11px; font-style: italic;")
+        self._az_note.setProperty("class", "note")
         self._az_note.setWordWrap(True)
         api_lay.addWidget(self._az_note)
 
-        # Save
-        save_row = QHBoxLayout()
-        save_row.addStretch()
+        api_lay.addWidget(self._h_line())
+
+        # Test + Save row
+        self._test_result = QLabel("")
+        self._test_result.setProperty("class", "secondary")
+        self._test_result.setWordWrap(True)
+        self._test_result.setTextFormat(Qt.TextFormat.RichText)
+        api_lay.addWidget(self._test_result)
+
+        action_row = QHBoxLayout()
+        self._test_btn = QPushButton(t("settings.test_keys"))
+        self._test_btn.setFixedHeight(40)
+        self._test_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._reg_icon_button(self._test_btn, "check", "accent", 16)
+        self._test_btn.clicked.connect(self._test_keys)
+        action_row.addWidget(self._test_btn)
+        action_row.addStretch()
+
         self._save_btn = QPushButton(t("settings.save"))
         self._save_btn.setProperty("class", "accent-btn")
         self._save_btn.setFixedSize(130, 40)
-        self._save_btn.setIcon(icons.icon("check", "#ffffff", 16))
-        self._save_btn.setIconSize(QSize(16, 16))
+        self._reg_icon_button(self._save_btn, "check", "on_accent", 16)
         self._save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._save_btn.clicked.connect(self._save_settings)
-        save_row.addWidget(self._save_btn)
-        api_lay.addLayout(save_row)
+        action_row.addWidget(self._save_btn)
+        api_lay.addLayout(action_row)
 
         lay.addWidget(self._api_group)
 
@@ -844,11 +857,8 @@ class MainWindow(QMainWindow):
         self._about_group = QGroupBox(t("settings.about_title"))
         about_lay = QVBoxLayout(self._about_group)
         about_lay.setContentsMargins(18, 12, 18, 16)
-        self._about_txt = QLabel(
-            f"{APP_NAME} v{APP_VERSION}\n\n"
-            f"{t('settings.about_desc')}"
-        )
-        self._about_txt.setStyleSheet(f"color: {SEC}; font-size: 12px; line-height: 1.5;")
+        self._about_txt = QLabel(f"{APP_NAME} v{APP_VERSION}\n\n{t('settings.about_desc')}")
+        self._about_txt.setProperty("class", "secondary")
         self._about_txt.setWordWrap(True)
         about_lay.addWidget(self._about_txt)
         lay.addWidget(self._about_group)
@@ -858,12 +868,36 @@ class MainWindow(QMainWindow):
         outer.addWidget(scroll)
         return page
 
-    # ── Generic UI helpers ───────────────────────────────────────
+    # ── Settings helpers ─────────────────────────────────────────
+
+    def _key_row(self, placeholder: str, value: str, parent_lay) -> tuple:
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        field = QLineEdit(value)
+        field.setEchoMode(QLineEdit.EchoMode.Password)
+        field.setPlaceholderText(placeholder)
+        row.addWidget(field, 1)
+        toggle = QPushButton(t("settings.btn_show"))
+        toggle.setProperty("class", "toggle-btn")
+        toggle.setFixedSize(64, 38)
+        toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        toggle.clicked.connect(lambda: self._toggle_visibility(field, toggle))
+        row.addWidget(toggle)
+        parent_lay.addLayout(row)
+        return field, toggle
+
+    def _link_button(self, text: str, url: str, parent_lay) -> QPushButton:
+        btn = QPushButton(text)
+        btn.setProperty("class", "link-btn")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.clicked.connect(lambda: webbrowser.open(url))
+        parent_lay.addWidget(btn)
+        return btn
 
     def _h_line(self) -> QFrame:
         line = QFrame()
+        line.setObjectName("hLine")
         line.setFixedHeight(1)
-        line.setStyleSheet("background-color: #242b3a;")
         return line
 
     def _toggle_visibility(self, field: QLineEdit, btn: QPushButton):
@@ -880,6 +914,59 @@ class MainWindow(QMainWindow):
             self._config.set("translation.provider", provider)
             self._config.save()
 
+    def _on_theme_changed(self, index: int):
+        mode = self._theme_combo.itemData(index)
+        if mode and mode != self._mode:
+            self._apply_theme(mode)
+            self._config.set("gui.theme", mode)
+            self._config.save()
+
+    # ── API key testing ──────────────────────────────────────────
+
+    def _test_keys(self):
+        asyncio.ensure_future(self._run_key_tests())
+
+    async def _run_key_tests(self):
+        loop = asyncio.get_event_loop()
+        self._test_result.setText(t("settings.testing"))
+        self._test_btn.setEnabled(False)
+        try:
+            dg = self._deepgram_key.text().strip()
+            dl = self._deepl_key.text().strip()
+            gg = self._google_key.text().strip()
+            az = self._azure_key.text().strip()
+            region = self._azure_region.text().strip() or "westeurope"
+
+            results = {
+                "Deepgram": await loop.run_in_executor(None, key_validator.validate_deepgram, dg),
+                "DeepL": await loop.run_in_executor(None, key_validator.validate_deepl, dl),
+                "Google": await loop.run_in_executor(None, key_validator.validate_google, gg),
+                "Azure": await loop.run_in_executor(None, key_validator.validate_azure, az, region),
+            }
+            self._test_result.setText(self._format_test_results(results))
+        finally:
+            self._test_btn.setEnabled(True)
+
+    def _format_test_results(self, results: dict) -> str:
+        color = {
+            "valid": self._c("ok"),
+            "invalid": self._c("err"),
+            "empty": self._c("text_muted"),
+            "error": self._c("warn"),
+        }
+        mark = {"valid": "✓", "invalid": "✕", "empty": "–", "error": "!"}
+        msg_key = {
+            "valid": "settings.key_valid",
+            "invalid": "settings.key_invalid",
+            "empty": "settings.key_empty",
+            "error": "settings.key_error",
+        }
+        lines = []
+        for svc, st in results.items():
+            txt = t(msg_key.get(st, "settings.key_error"), service=svc)
+            lines.append(f'<span style="color:{color.get(st, color["error"])}">{mark.get(st, "?")} {txt}</span>')
+        return "<br>".join(lines)
+
     # ================================================================
     #  i18n — RETRANSLATE UI
     # ================================================================
@@ -894,20 +981,16 @@ class MainWindow(QMainWindow):
 
     def _retranslate_ui(self):
         """Refresh every translatable text in the window."""
-        # Sidebar
         self._nav_section.setText("  " + t("sidebar.section_main"))
         for i, key in enumerate(self._nav_keys):
             self._nav_buttons[i].setText("  " + t(key))
 
-        if self._running:
-            self._sidebar_status.setText(t("sidebar.active"))
-        else:
-            self._sidebar_status.setText(t("sidebar.ready"))
+        self._sidebar_status.setText(t("sidebar.active") if self._running else t("sidebar.ready"))
 
-        # -- Translation page --
+        # Translation page
         self._tr_title.setText(t("sidebar.translation"))
         self._tr_sub.setText(t("page.translation_subtitle"))
-        self._style_pill(self._tr_pill, "active" if self._running else "idle")
+        self._style_pill(self._tr_pill, "active" if self._running else self._pill_state)
         self._lang_card_title.setText(t("page.lang_selection"))
         self._src_label.setText(t("label.source"))
         self._tgt_label.setText(t("label.target"))
@@ -928,7 +1011,7 @@ class MainWindow(QMainWindow):
         self._source_text.setPlaceholderText(t("transcript.source_placeholder"))
         self._target_text.setPlaceholderText(t("transcript.target_placeholder"))
 
-        # -- Stats page --
+        # Stats page
         self._stats_title.setText(t("stats.title"))
         self._stats_sub.setText(t("page.stats_subtitle"))
         self._stat_session["label"].setText(t("stats.session_duration"))
@@ -943,10 +1026,14 @@ class MainWindow(QMainWindow):
             t("stats.col_translation"), t("stats.col_latency"),
         ])
 
-        # -- Settings page --
+        # Settings page
         self._settings_title.setText(t("settings.title"))
         self._settings_sub.setText(t("page.settings_subtitle"))
-        self._lang_ui_group.setTitle(t("settings.ui_language"))
+        self._appearance_group.setTitle(t("settings.appearance"))
+        self._ui_lang_lbl.setText(t("settings.ui_language"))
+        self._theme_lbl.setText(t("settings.theme"))
+        self._theme_combo.setItemText(0, t("settings.theme_light"))
+        self._theme_combo.setItemText(1, t("settings.theme_dark"))
         self._api_group.setTitle(t("settings.api_keys"))
         self._api_info.setText(t("settings.api_info"))
         self._dg_title.setText(t("settings.deepgram_title"))
@@ -963,6 +1050,7 @@ class MainWindow(QMainWindow):
         self._dl_link.setText(t("settings.link_deepl"))
         self._az_link.setText(t("settings.link_azure"))
         self._region_lbl.setText(t("settings.region"))
+        self._test_btn.setText(t("settings.test_keys"))
         self._save_btn.setText(t("settings.save"))
         self._provider_group.setTitle(t("settings.translation_provider"))
         self._provider_note.setText(t("settings.provider_note"))
@@ -971,21 +1059,15 @@ class MainWindow(QMainWindow):
         self._guide_group.setTitle(t("settings.guide_title"))
         self._guide_browser.setHtml(t("settings.guide_html"))
         self._about_group.setTitle(t("settings.about_title"))
-        self._about_txt.setText(
-            f"{APP_NAME} v{APP_VERSION}\n\n"
-            f"{t('settings.about_desc')}"
-        )
+        self._about_txt.setText(f"{APP_NAME} v{APP_VERSION}\n\n{t('settings.about_desc')}")
 
-        # Toggle buttons — reset to "Show"
         self._dg_toggle.setText(t("settings.btn_show"))
         self._dl_toggle.setText(t("settings.btn_show"))
         self._gg_toggle.setText(t("settings.btn_show"))
         self._az_toggle.setText(t("settings.btn_show"))
 
-        # Re-populate devices to update translated prefixes
         self._populate_devices()
 
-        # System tray
         tray = getattr(self, "_system_tray", None)
         if tray and hasattr(tray, "retranslate_ui"):
             tray.retranslate_ui()
@@ -1038,10 +1120,11 @@ class MainWindow(QMainWindow):
             if cable_idx >= 0:
                 self._output_device.setCurrentIndex(cable_idx)
                 self._vb_status.setText(t("vbcable.detected"))
-                self._vb_status.setStyleSheet(f"color: {OK}; font-size: 11px;")
+                self._vb_state = True
             else:
                 self._vb_status.setText(t("vbcable.not_found"))
-                self._vb_status.setStyleSheet(f"color: {WARN}; font-size: 11px;")
+                self._vb_state = False
+            self._apply_vb_status_color()
 
         except Exception as e:
             self._status_label.setText(t("error.device_error", error=e))
@@ -1079,7 +1162,7 @@ class MainWindow(QMainWindow):
         self._config.save_api_keys(dg, dl, az, region, gg)
         self._navigate_to(0)
         self._status_label.setText(t("settings.saved_ok"))
-        self._status_label.setStyleSheet(f"color: {OK}; font-size: 12px; font-weight: 600;")
+        self._status_label.setStyleSheet(f"color: {self._c('ok')}; font-size: 12px; font-weight: 600;")
         self._populate_devices()
 
     # ================================================================
@@ -1107,23 +1190,28 @@ class MainWindow(QMainWindow):
         if not self._config.deepgram_api_key:
             self._navigate_to(2)
             self._status_label.setText(t("status.enter_keys"))
-            self._status_label.setStyleSheet(f"color: {WARN}; font-size: 12px;")
+            self._status_label.setStyleSheet(f"color: {self._c('warn')}; font-size: 12px;")
             return
         if provider == "google" and not self._config.google_api_key:
             self._navigate_to(2)
             self._status_label.setText(t("status.enter_keys"))
-            self._status_label.setStyleSheet(f"color: {WARN}; font-size: 12px;")
+            self._status_label.setStyleSheet(f"color: {self._c('warn')}; font-size: 12px;")
             return
         if provider == "deepl" and not self._config.deepl_api_key:
             self._navigate_to(2)
             self._status_label.setText(t("status.enter_keys"))
-            self._status_label.setStyleSheet(f"color: {WARN}; font-size: 12px;")
+            self._status_label.setStyleSheet(f"color: {self._c('warn')}; font-size: 12px;")
             return
 
         source = self._source_lang.currentData()
         target = self._target_lang.currentData()
         input_dev = self._input_device.currentData()
         output_dev = self._output_device.currentData()
+
+        # Persist chosen language pair
+        self._config.set("translation.source_language", source)
+        self._config.set("translation.target_language", target)
+        self._config.save()
 
         audio_engine = AudioEngine(
             sample_rate=self._config.get("audio.sample_rate", 16000),
@@ -1134,6 +1222,10 @@ class MainWindow(QMainWindow):
         stt = DeepgramSTT(
             api_key=self._config.deepgram_api_key,
             model=self._config.get("stt.deepgram.model", "nova-2"),
+            sample_rate=self._config.get("audio.sample_rate", 16000),
+            interim_results=self._config.get("stt.deepgram.interim_results", True),
+            endpointing=self._config.get("stt.deepgram.endpointing", 300),
+            punctuate=self._config.get("stt.deepgram.punctuate", True),
         )
 
         if provider == "google":
@@ -1182,7 +1274,7 @@ class MainWindow(QMainWindow):
             self._running = True
 
             self._start_btn.setText(t("btn.stop"))
-            self._start_btn.setIcon(icons.icon("stop", "#ffffff", 18))
+            self._start_btn.setIcon(icons.icon("stop", self._pal["on_accent"], 18))
             self._start_btn.setProperty("running", "true")
             self._start_btn.style().unpolish(self._start_btn)
             self._start_btn.style().polish(self._start_btn)
@@ -1190,7 +1282,7 @@ class MainWindow(QMainWindow):
             src_name = SUPPORTED_LANGUAGES.get(source, {}).get("name", source)
             tgt_name = SUPPORTED_LANGUAGES.get(target, {}).get("name", target)
             self._status_label.setText(t("status.active", src=src_name, tgt=tgt_name))
-            self._status_label.setStyleSheet(f"color: {OK}; font-size: 12px; font-weight: 600;")
+            self._status_label.setStyleSheet(f"color: {self._c('ok')}; font-size: 12px; font-weight: 600;")
 
             self._sidebar_status.setText(t("sidebar.active"))
             self._update_sidebar_badge("active")
@@ -1216,15 +1308,15 @@ class MainWindow(QMainWindow):
         self._running = False
 
         self._start_btn.setText(t("btn.start"))
-        self._start_btn.setIcon(icons.icon("play", "#ffffff", 18))
+        self._start_btn.setIcon(icons.icon("play", self._pal["on_accent"], 18))
         self._start_btn.setProperty("running", "false")
         self._start_btn.style().unpolish(self._start_btn)
         self._start_btn.style().polish(self._start_btn)
 
         self._status_label.setText(t("status.stopped"))
-        self._status_label.setStyleSheet(f"color: {SEC}; font-size: 12px;")
+        self._status_label.setStyleSheet(f"color: {self._c('text_sec')}; font-size: 12px;")
         self._latency_label.setText(t("status.latency"))
-        self._latency_label.setStyleSheet(f"color: {MUTED}; font-size: 12px;")
+        self._latency_label.setStyleSheet(f"color: {self._c('text_muted')}; font-size: 12px;")
 
         self._sidebar_status.setText(t("sidebar.stopped"))
         self._update_sidebar_badge("stopped")
@@ -1276,18 +1368,18 @@ class MainWindow(QMainWindow):
             self._source_text.append(text)
         else:
             self._status_label.setText(t("status.listening", text=text[:60]))
-            self._status_label.setStyleSheet(f"color: {SEC}; font-size: 12px;")
+            self._status_label.setStyleSheet(f"color: {self._c('text_sec')}; font-size: 12px;")
 
     def _update_translation(self, text: str, lang: str):
         self._target_text.append(text)
 
     def _update_latency(self, ms: float):
         if ms < 800:
-            color = OK
+            color = self._c("ok")
         elif ms < 1500:
-            color = WARN
+            color = self._c("warn")
         else:
-            color = ERR
+            color = self._c("err")
         self._latency_label.setText(t("status.latency_value", ms=ms))
         self._latency_label.setStyleSheet(f"color: {color}; font-size: 12px; font-weight: 600;")
 

@@ -500,6 +500,56 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "en": "Interface Language",
         "ru": "Язык интерфейса",
     },
+    "settings.theme": {
+        "tr": "Tema",
+        "en": "Theme",
+        "ru": "Тема",
+    },
+    "settings.theme_light": {
+        "tr": "Acik",
+        "en": "Light",
+        "ru": "Светлая",
+    },
+    "settings.theme_dark": {
+        "tr": "Koyu",
+        "en": "Dark",
+        "ru": "Темная",
+    },
+    "settings.appearance": {
+        "tr": "Gorunum",
+        "en": "Appearance",
+        "ru": "Внешний вид",
+    },
+    "settings.test_keys": {
+        "tr": "Anahtarlari Test Et",
+        "en": "Test Keys",
+        "ru": "Проверить ключи",
+    },
+    "settings.testing": {
+        "tr": "Test ediliyor...",
+        "en": "Testing...",
+        "ru": "Проверка...",
+    },
+    "settings.key_valid": {
+        "tr": "{service}: Gecerli",
+        "en": "{service}: Valid",
+        "ru": "{service}: Действителен",
+    },
+    "settings.key_invalid": {
+        "tr": "{service}: GECERSIZ",
+        "en": "{service}: INVALID",
+        "ru": "{service}: НЕДЕЙСТВИТЕЛЕН",
+    },
+    "settings.key_empty": {
+        "tr": "{service}: bos (atlandi)",
+        "en": "{service}: empty (skipped)",
+        "ru": "{service}: пусто (пропущено)",
+    },
+    "settings.key_error": {
+        "tr": "{service}: baglanti hatasi",
+        "en": "{service}: connection error",
+        "ru": "{service}: ошибка соединения",
+    },
     "settings.missing_field": {
         "tr": "Eksik Alan",
         "en": "Missing Field",

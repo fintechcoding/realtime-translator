@@ -29,9 +29,10 @@ class TranslationPipeline:
         self._source_lang: str = "TR"
         self._target_lang: str = "RU"
         self._running = False
-        self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=200)
         self._send_task: Optional[asyncio.Task] = None
         self._output_device_id: Optional[int] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     @property
     def is_running(self) -> bool:
@@ -54,6 +55,7 @@ class TranslationPipeline:
 
         self._running = True
         self._output_device_id = output_device_id
+        self._loop = asyncio.get_running_loop()
         log.info(f"Pipeline starting: {self._source_lang} -> {self._target_lang}")
 
         from app.utils.constants import SUPPORTED_LANGUAGES
@@ -89,10 +91,23 @@ class TranslationPipeline:
         log.info("Pipeline stopped")
 
     def _on_audio_captured(self, audio_bytes: bytes):
+        # Called from the PortAudio callback thread — marshal onto the loop,
+        # because asyncio.Queue is not thread-safe.
+        loop = self._loop
+        if loop is None:
+            return
+        loop.call_soon_threadsafe(self._enqueue_audio, audio_bytes)
+
+    def _enqueue_audio(self, audio_bytes: bytes):
         try:
             self._audio_queue.put_nowait(audio_bytes)
         except asyncio.QueueFull:
-            pass
+            # Drop the oldest chunk to keep latency bounded under backpressure.
+            try:
+                self._audio_queue.get_nowait()
+                self._audio_queue.put_nowait(audio_bytes)
+            except (asyncio.QueueEmpty, asyncio.QueueFull):
+                pass
 
     async def _audio_send_loop(self):
         while self._running:
@@ -107,7 +122,14 @@ class TranslationPipeline:
                 log.error(f"Audio send error: {e}")
 
     def _on_transcript(self, text: str, is_final: bool):
-        asyncio.ensure_future(self._process_transcript(text, is_final))
+        # Deepgram dispatches this on its listen thread; schedule the coroutine
+        # on the event loop thread (asyncio.ensure_future needs a running loop).
+        loop = self._loop
+        if loop is None:
+            return
+        loop.call_soon_threadsafe(
+            lambda: asyncio.ensure_future(self._process_transcript(text, is_final))
+        )
 
     async def _process_transcript(self, text: str, is_final: bool):
         start_time = time.time()
@@ -118,10 +140,15 @@ class TranslationPipeline:
 
         from app.utils.constants import SUPPORTED_LANGUAGES
         lang_key = self._translator.lang_key
-        source_deepl = SUPPORTED_LANGUAGES.get(self._source_lang, {}).get(lang_key, "TR")
-        target_deepl = SUPPORTED_LANGUAGES.get(self._target_lang, {}).get(lang_key, "RU")
+        source_code = SUPPORTED_LANGUAGES.get(self._source_lang, {}).get(lang_key, "TR")
+        target_code = SUPPORTED_LANGUAGES.get(self._target_lang, {}).get(lang_key, "RU")
 
-        translated = await self._translator.translate(text, source_deepl, target_deepl)
+        # DeepL accepts regional codes (EN-US, PT-PT, ZH-HANS) only as the target;
+        # the source must be the base language code.
+        if lang_key == "deepl":
+            source_code = source_code.split("-")[0]
+
+        translated = await self._translator.translate(text, source_code, target_code)
         await self._bus.emit("translation", translated, self._target_lang)
 
         tts_provider = self._tts_manager.get_provider(self._target_lang)
