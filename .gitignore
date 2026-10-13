@@ -1,0 +1,16 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+dist/
+build/
+installer_output/
+*.egg-info/
+.idea/
+.vscode/
+*.spec
+!RealTimeTranslator.spec
+
+.claude/settings.local.json
